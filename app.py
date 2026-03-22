@@ -1,5 +1,5 @@
 import streamlit as st
-import sqlite3
+import psycopg2
 import hashlib
 import os
 from datetime import datetime
@@ -9,72 +9,31 @@ from datetime import datetime
 # ============================================================
 @st.cache_resource
 def get_connection():
-    conn = sqlite3.connect(
-        "database.db",
-        check_same_thread=False,
-        timeout=10,
-        isolation_level=None
-    )
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=10000")
-    conn.execute("PRAGMA synchronous=NORMAL")
+    conn = psycopg2.connect(st.secrets["DATABASE_URL"])
+    conn.autocommit = True
     return conn
 
+def get_cursor():
+    """Get a fresh cursor, reconnecting if needed."""
+    try:
+        conn = get_connection()
+        if conn.closed:
+            get_connection.clear()
+            conn = get_connection()
+        cur = conn.cursor()
+        return cur
+    except Exception:
+        get_connection.clear()
+        conn = get_connection()
+        return conn.cursor()
+
 conn = get_connection()
-c = conn.cursor()
+c = get_cursor()
 
 # ============================================================
 #  DB TABLES SETUP
 # ============================================================
-c.execute('''
-CREATE TABLE IF NOT EXISTS users (
-    id      INTEGER PRIMARY KEY AUTOINCREMENT,
-    name    TEXT    NOT NULL,
-    company TEXT    NOT NULL,
-    role    TEXT    NOT NULL,
-    skills  TEXT    NOT NULL
-)
-''')
-
-c.execute('''
-CREATE TABLE IF NOT EXISTS accounts (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    username      TEXT    UNIQUE NOT NULL,
-    password_hash TEXT    NOT NULL,
-    role          TEXT    NOT NULL DEFAULT "user"
-)
-''')
-
-c.execute('''
-CREATE TABLE IF NOT EXISTS connections (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    from_user   TEXT    NOT NULL,
-    to_user     TEXT    NOT NULL,
-    status      TEXT    NOT NULL DEFAULT "pending",
-    created_at  TEXT    NOT NULL,
-    UNIQUE(from_user, to_user)
-)
-''')
-
-c.execute('''
-CREATE TABLE IF NOT EXISTS messages (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    from_user   TEXT    NOT NULL,
-    to_user     TEXT    NOT NULL,
-    message     TEXT    NOT NULL,
-    is_read     INTEGER NOT NULL DEFAULT 0,
-    created_at  TEXT    NOT NULL
-)
-''')
-
-# Seed default admin
-ADMIN_HASH = hashlib.sha256("admin123".encode()).hexdigest()
-c.execute("SELECT id FROM accounts WHERE username='admin'")
-if not c.fetchone():
-    c.execute(
-        "INSERT INTO accounts (username, password_hash, role) VALUES (?, ?, ?)",
-        ("admin", ADMIN_HASH, "admin")
-    )
+# Admin seeded via Supabase SQL editor
 
 # ============================================================
 #  HELPERS
@@ -127,21 +86,21 @@ def profile_card(row, show_full=True):
     """
 
 def get_conn_status(from_user, to_user):
-    c.execute("SELECT status FROM connections WHERE from_user=? AND to_user=?",
+    c.execute("SELECT status FROM connections WHERE from_user=%s AND to_user=%s",
               (from_user, to_user))
     row = c.fetchone()
     if row: return row[0]
-    c.execute("SELECT status FROM connections WHERE from_user=? AND to_user=?",
+    c.execute("SELECT status FROM connections WHERE from_user=%s AND to_user=%s",
               (to_user, from_user))
     row = c.fetchone()
     return row[0] if row else None
 
 def get_unread_count(username):
-    c.execute("SELECT COUNT(*) FROM messages WHERE to_user=? AND is_read=0", (username,))
+    c.execute("SELECT COUNT(*) FROM messages WHERE to_user=%s AND is_read=0", (username,))
     return c.fetchone()[0]
 
 def get_pending_requests(username):
-    c.execute("SELECT from_user FROM connections WHERE to_user=? AND status='pending'",
+    c.execute("SELECT from_user FROM connections WHERE to_user=%s AND status='pending'",
               (username,))
     return c.fetchall()
 
@@ -173,7 +132,7 @@ if st.session_state.role is None:
                 st.error("Please enter username and password.")
             else:
                 clean_user = username_in.strip()
-                c.execute("SELECT role FROM accounts WHERE username=? AND password_hash=?",
+                c.execute("SELECT role FROM accounts WHERE username=%s AND password_hash=%s",
                           (clean_user, hash_password(password_in)))
                 result = c.fetchone()
                 if result:
@@ -182,12 +141,18 @@ if st.session_state.role is None:
                     st.success(f"✅ Logged in as **{result[0]}**")
                     st.rerun()
                 else:
-                    c.execute("SELECT id FROM accounts WHERE username=?", (clean_user,))
+                    c.execute("SELECT id FROM accounts WHERE username=%s", (clean_user,))
                     if c.fetchone():
                         st.error("❌ Wrong password.")
                     else:
                         st.error(f"❌ No account found for '{clean_user}'. Please register first.")
-                        
+
+        with st.expander("🔧 Debug — Check registered accounts"):
+            c.execute("SELECT username, role FROM accounts")
+            for acc in c.fetchall():
+                st.write(f"👤 `{acc[0]}` — `{acc[1]}`")
+            st.caption(f"DB: `{os.path.abspath('database.db')}`")
+
     with tab2:
         st.markdown("### Create a new account")
         new_user = st.text_input("Choose Username", key="reg_user")
@@ -203,11 +168,11 @@ if st.session_state.role is None:
             else:
                 try:
                     c.execute(
-                        "INSERT INTO accounts (username, password_hash, role) VALUES (?, ?, ?)",
+                        "INSERT INTO accounts (username, password_hash, role) VALUES (%s, %s, %s)",
                         (new_user.strip(), hash_password(new_pw), "user")
                     )
                     st.success(f"✅ Account **'{new_user.strip()}'** created! Go to Login tab.")
-                except sqlite3.IntegrityError:
+                except psycopg2.errors.UniqueViolation:
                     st.error(f"Username '{new_user.strip()}' already taken.")
                 except Exception as ex:
                     st.error(f"❌ Error: {ex}")
@@ -252,6 +217,24 @@ st.markdown("""
 <h1 style='text-align:center;color:#2E86C1;'>🚀 Employee Connect App</h1>
 """, unsafe_allow_html=True)
 
+# DB connection status check
+try:
+    c.execute("SELECT COUNT(*) FROM users")
+    user_count = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM accounts")
+    acc_count = c.fetchone()[0]
+    st.sidebar.success(f"✅ DB Connected | Users: {user_count} | Accounts: {acc_count}")
+except Exception as db_err:
+    st.sidebar.error(f"❌ DB Error: {db_err}")
+    # Try to reconnect
+    try:
+        get_connection.clear()
+        conn = get_connection()
+        c = conn.cursor()
+        st.sidebar.warning("🔄 Reconnected to DB")
+    except Exception as re_err:
+        st.sidebar.error(f"❌ Reconnect failed: {re_err}")
+
 # ============================================================
 #  ADD PROFILE
 # ============================================================
@@ -273,7 +256,7 @@ if choice == "➕ Add Profile":
         if errors:
             for e in errors: st.error(f"❌ {e}")
         else:
-            c.execute("INSERT INTO users (name, company, role, skills) VALUES (?, ?, ?, ?)",
+            c.execute("INSERT INTO users (name, company, role, skills) VALUES (%s, %s, %s, %s)",
                       (name.strip(), company.strip(), role_input.strip(), skills.strip()))
             st.success("✅ Profile saved successfully!")
 
@@ -295,7 +278,7 @@ elif choice == "👥 View Profiles":
         st.caption(f"Page {page} of {total_pages}  •  {total} profiles")
 
     offset = (page - 1) * PAGE_SIZE
-    c.execute("SELECT * FROM users LIMIT ? OFFSET ?", (PAGE_SIZE, offset))
+    c.execute("SELECT * FROM users LIMIT %s OFFSET %s", (PAGE_SIZE, offset))
     data = c.fetchall()
     me = st.session_state.username
     is_admin = st.session_state.role == "admin"
@@ -316,11 +299,11 @@ elif choice == "👥 View Profiles":
                                          use_container_width=True):
                                 try:
                                     c.execute(
-                                        "INSERT INTO connections (from_user,to_user,status,created_at) VALUES(?,?,'pending',?)",
+                                        "INSERT INTO connections (from_user,to_user,status,created_at) VALUES(%s,%s,'pending',%s)",
                                         (me, row[1], now()))
                                     st.success(f"Request sent to {row[1]}!")
                                     st.rerun()
-                                except sqlite3.IntegrityError:
+                                except psycopg2.errors.UniqueViolation:
                                     st.warning("Already sent.")
                         elif status == "pending":
                             st.button("⏳ Pending",  key=f"conn_{row[0]}", disabled=True, use_container_width=True)
@@ -340,14 +323,14 @@ elif choice == "👥 View Profiles":
                             st.session_state.edit_id = row[0]
                     with d2:
                         if st.button("🗑️ Delete", key=f"del_{row[0]}"):
-                            c.execute("DELETE FROM users WHERE id=?", (row[0],))
+                            c.execute("DELETE FROM users WHERE id=%s", (row[0],))
                             st.success(f"Deleted {row[1]}")
                             st.rerun()
 
         if st.session_state.edit_id:
             st.divider()
             st.subheader("✏️ Edit Profile")
-            c.execute("SELECT * FROM users WHERE id=?", (st.session_state.edit_id,))
+            c.execute("SELECT * FROM users WHERE id=%s", (st.session_state.edit_id,))
             er = c.fetchone()
             if er:
                 with st.form("edit_form"):
@@ -368,7 +351,7 @@ elif choice == "👥 View Profiles":
                         for e in errors: st.error(f"❌ {e}")
                     else:
                         c.execute(
-                            "UPDATE users SET name=?,company=?,role=?,skills=? WHERE id=?",
+                            "UPDATE users SET name=%s,company=%s,role=%s,skills=%s WHERE id=%s",
                             (e_name.strip(), e_company.strip(),
                              e_role.strip(), e_skills.strip(), st.session_state.edit_id))
                         st.session_state.edit_id = None
@@ -395,7 +378,7 @@ elif choice == "👥 View Profiles":
                 st.error("Message cannot be empty.")
             else:
                 c.execute(
-                    "INSERT INTO messages (from_user,to_user,message,is_read,created_at) VALUES(?,?,?,0,?)",
+                    "INSERT INTO messages (from_user,to_user,message,is_read,created_at) VALUES(%s,%s,%s,0,%s)",
                     (me, target, msg_text.strip(), now()))
                 st.session_state.chat_with = None
                 st.success(f"✅ Message sent to {target}!")
@@ -441,7 +424,7 @@ elif choice == "💬 Messages":
                  ORDER BY other""", (me, me, me))
     conversations = [r[0] for r in c.fetchall()]
 
-    c.execute("SELECT username FROM accounts WHERE username != ?", (me,))
+    c.execute("SELECT username FROM accounts WHERE username != %s", (me,))
     all_users = [r[0] for r in c.fetchall()]
 
     left_col, right_col = st.columns([1, 2])
@@ -457,7 +440,7 @@ elif choice == "💬 Messages":
 
         st.markdown("---")
         for person in conversations:
-            c.execute("SELECT COUNT(*) FROM messages WHERE from_user=? AND to_user=? AND is_read=0",
+            c.execute("SELECT COUNT(*) FROM messages WHERE from_user=%s AND to_user=%s AND is_read=0",
                       (person, me))
             unread_from = c.fetchone()[0]
             label = f"🔴 {person} ({unread_from})" if unread_from > 0 else f"💬 {person}"
@@ -472,7 +455,7 @@ elif choice == "💬 Messages":
             st.markdown("---")
 
             # Mark as read
-            c.execute("UPDATE messages SET is_read=1 WHERE from_user=? AND to_user=? AND is_read=0",
+            c.execute("UPDATE messages SET is_read=1 WHERE from_user=%s AND to_user=%s AND is_read=0",
                       (chat_with, me))
 
             # Load history
@@ -515,7 +498,7 @@ elif choice == "💬 Messages":
                 if st.form_submit_button("📤 Send", use_container_width=True):
                     if msg_input.strip():
                         c.execute(
-                            "INSERT INTO messages (from_user,to_user,message,is_read,created_at) VALUES(?,?,?,0,?)",
+                            "INSERT INTO messages (from_user,to_user,message,is_read,created_at) VALUES(%s,%s,%s,0,%s)",
                             (me, chat_with, msg_input.strip(), now()))
                         st.rerun()
         else:
@@ -537,7 +520,7 @@ elif choice == "🤝 My Connections":
     ])
 
     with tab_pending:
-        c.execute("SELECT from_user, created_at FROM connections WHERE to_user=? AND status='pending'",
+        c.execute("SELECT from_user, created_at FROM connections WHERE to_user=%s AND status='pending'",
                   (me,))
         pending = c.fetchall()
         if pending:
@@ -547,13 +530,13 @@ elif choice == "🤝 My Connections":
                 col1.markdown(f"**👤 {from_user}**  \n*{created_at[:10]}*")
                 with col2:
                     if st.button("✅ Accept", key=f"acc_{from_user}", use_container_width=True):
-                        c.execute("UPDATE connections SET status='accepted' WHERE from_user=? AND to_user=?",
+                        c.execute("UPDATE connections SET status='accepted' WHERE from_user=%s AND to_user=%s",
                                   (from_user, me))
                         st.success(f"Connected with {from_user}!")
                         st.rerun()
                 with col3:
                     if st.button("❌ Decline", key=f"dec_{from_user}", use_container_width=True):
-                        c.execute("UPDATE connections SET status='rejected' WHERE from_user=? AND to_user=?",
+                        c.execute("UPDATE connections SET status='rejected' WHERE from_user=%s AND to_user=%s",
                                   (from_user, me))
                         st.info(f"Declined {from_user}.")
                         st.rerun()
@@ -562,10 +545,10 @@ elif choice == "🤝 My Connections":
             st.info("No pending requests.")
 
     with tab_accepted:
-        c.execute("""SELECT CASE WHEN from_user=? THEN to_user ELSE from_user END as friend,
+        c.execute("""SELECT CASE WHEN from_user=%s THEN to_user ELSE from_user END as friend,
                             created_at
                      FROM connections
-                     WHERE (from_user=? OR to_user=?) AND status='accepted'""",
+                     WHERE (from_user=%s OR to_user=%s) AND status='accepted'""",
                   (me, me, me))
         accepted = c.fetchall()
         if accepted:
@@ -588,7 +571,7 @@ elif choice == "🤝 My Connections":
                         if st.button("🔗 Remove", key=f"rem_{friend}", use_container_width=True):
                             c.execute("""DELETE FROM connections
                                          WHERE (from_user=? AND to_user=?)
-                                            OR (from_user=? AND to_user=?)""",
+                                            OR (from_user=%s AND to_user=%s)""",
                                       (me, friend, friend, me))
                             st.success(f"Removed {friend}.")
                             st.rerun()
@@ -596,7 +579,7 @@ elif choice == "🤝 My Connections":
             st.info("No connections yet. Go to View Profiles and connect!")
 
     with tab_sent:
-        c.execute("SELECT to_user, status, created_at FROM connections WHERE from_user=?", (me,))
+        c.execute("SELECT to_user, status, created_at FROM connections WHERE from_user=%s", (me,))
         sent = c.fetchall()
         if sent:
             for to_user, status, created_at in sent:
@@ -607,7 +590,7 @@ elif choice == "🤝 My Connections":
                 col2.markdown(badge)
                 if status in ("rejected", "accepted"):
                     if st.button("🗑️ Remove", key=f"remsent_{to_user}"):
-                        c.execute("DELETE FROM connections WHERE from_user=? AND to_user=?",
+                        c.execute("DELETE FROM connections WHERE from_user=%s AND to_user=%s",
                                   (me, to_user))
                         st.rerun()
                 st.markdown("---")
@@ -625,7 +608,7 @@ elif choice == "🔍 Search":
                            placeholder="e.g. Python, Data Analyst, Google")
     if search.strip():
         term = f"%{search.strip()}%"
-        c.execute("SELECT * FROM users WHERE name LIKE ? OR company LIKE ? OR role LIKE ? OR skills LIKE ?",
+        c.execute("SELECT * FROM users WHERE name LIKE %s OR company LIKE %s OR role LIKE %s OR skills LIKE %s",
                   (term, term, term, term))
         results = c.fetchall()
         st.caption(f"{len(results)} result(s) found")
@@ -642,11 +625,11 @@ elif choice == "🔍 Search":
                                 if st.button("🤝 Connect", key=f"srconn_{row[0]}", use_container_width=True):
                                     try:
                                         c.execute(
-                                            "INSERT INTO connections (from_user,to_user,status,created_at) VALUES(?,?,'pending',?)",
+                                            "INSERT INTO connections (from_user,to_user,status,created_at) VALUES(%s,%s,'pending',%s)",
                                             (me, row[1], now()))
                                         st.success("Request sent!")
                                         st.rerun()
-                                    except sqlite3.IntegrityError:
+                                    except psycopg2.errors.UniqueViolation:
                                         st.warning("Already sent.")
                             elif status == "pending":
                                 st.button("⏳ Pending",  key=f"srconn_{row[0]}", disabled=True, use_container_width=True)
@@ -696,7 +679,7 @@ elif choice == "⚙️ Admin Panel" and st.session_state.role == "admin":
         a2.write(f"Role: `{acc[2]}`")
         if acc[1] != st.session_state.username:
             if a3.button("🗑️", key=f"delacc_{acc[0]}"):
-                c.execute("DELETE FROM accounts WHERE id=?", (acc[0],))
+                c.execute("DELETE FROM accounts WHERE id=%s", (acc[0],))
                 st.success(f"Deleted '{acc[1]}'.")
                 st.rerun()
         else:
@@ -709,7 +692,7 @@ elif choice == "⚙️ Admin Panel" and st.session_state.role == "admin":
     if reg_users:
         promote_name = st.selectbox("Select user", reg_users)
         if st.button("⬆️ Promote to Admin"):
-            c.execute("UPDATE accounts SET role='admin' WHERE username=?", (promote_name,))
+            c.execute("UPDATE accounts SET role='admin' WHERE username=%s", (promote_name,))
             st.success(f"✅ {promote_name} is now an admin!")
             st.rerun()
     else:
