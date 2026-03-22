@@ -35,6 +35,12 @@ c = get_cursor()
 # ============================================================
 # Admin seeded via Supabase SQL editor
 
+# Add username column to users if not exists (safe migration)
+try:
+    c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT DEFAULT ''")
+except Exception:
+    pass
+
 # ============================================================
 #  HELPERS
 # ============================================================
@@ -235,26 +241,71 @@ except Exception as db_err:
 #  ADD PROFILE
 # ============================================================
 if choice == "➕ Add Profile":
-    st.subheader("➕ Add Employee Profile")
-    with st.form("add_profile_form", clear_on_submit=True):
-        name       = st.text_input("Full Name")
-        company    = st.text_input("Company")
-        role_input = st.text_input("Role / Designation")
-        skills     = st.text_input("Skills (comma separated)",
-                                   placeholder="e.g. Python, SQL, Streamlit")
-        submitted  = st.form_submit_button("💾 Save Profile", use_container_width=True)
-    if submitted:
-        errors = []
-        if not name.strip():       errors.append("Name is required.")
-        if not company.strip():    errors.append("Company is required.")
-        if not role_input.strip(): errors.append("Role is required.")
-        if not skills.strip():     errors.append("Skills are required.")
-        if errors:
-            for e in errors: st.error(f"❌ {e}")
+    me = st.session_state.username
+    is_admin = st.session_state.role == "admin"
+
+    # Check if user already has a profile
+    c.execute("SELECT * FROM users WHERE username=%s", (me,))
+    existing = c.fetchone()
+
+    if existing and not is_admin:
+        # Regular user already has profile — show edit form
+        st.subheader("✏️ Your Profile")
+        st.info("You already have a profile. You can update it below.")
+        with st.form("edit_own_profile", clear_on_submit=False):
+            name       = st.text_input("Full Name",           value=existing[1])
+            company    = st.text_input("Company",             value=existing[2])
+            role_input = st.text_input("Role / Designation",  value=existing[3])
+            skills     = st.text_input("Skills (comma separated)", value=existing[4],
+                                       placeholder="e.g. Python, SQL, Streamlit")
+            submitted  = st.form_submit_button("💾 Update Profile", use_container_width=True)
+        if submitted:
+            errors = []
+            if not name.strip():       errors.append("Name is required.")
+            if not company.strip():    errors.append("Company is required.")
+            if not role_input.strip(): errors.append("Role is required.")
+            if not skills.strip():     errors.append("Skills are required.")
+            if errors:
+                for e in errors: st.error(f"❌ {e}")
+            else:
+                c.execute(
+                    "UPDATE users SET name=%s, company=%s, role=%s, skills=%s WHERE username=%s",
+                    (name.strip(), company.strip(), role_input.strip(), skills.strip(), me)
+                )
+                st.success("✅ Profile updated successfully!")
+                st.rerun()
+    else:
+        # Admin or user without profile — show add form
+        if is_admin:
+            st.subheader("➕ Add Employee Profile")
+            st.caption("As admin you can add profiles for anyone.")
         else:
-            c.execute("INSERT INTO users (name, company, role, skills) VALUES (%s, %s, %s, %s)",
-                      (name.strip(), company.strip(), role_input.strip(), skills.strip()))
-            st.success("✅ Profile saved successfully!")
+            st.subheader("➕ Create Your Profile")
+            st.caption("Create your professional profile to connect with others.")
+
+        with st.form("add_profile_form", clear_on_submit=True):
+            name       = st.text_input("Full Name")
+            company    = st.text_input("Company")
+            role_input = st.text_input("Role / Designation")
+            skills     = st.text_input("Skills (comma separated)",
+                                       placeholder="e.g. Python, SQL, Streamlit")
+            submitted  = st.form_submit_button("💾 Save Profile", use_container_width=True)
+
+        if submitted:
+            errors = []
+            if not name.strip():       errors.append("Name is required.")
+            if not company.strip():    errors.append("Company is required.")
+            if not role_input.strip(): errors.append("Role is required.")
+            if not skills.strip():     errors.append("Skills are required.")
+            if errors:
+                for e in errors: st.error(f"❌ {e}")
+            else:
+                c.execute(
+                    "INSERT INTO users (name, company, role, skills, username) VALUES (%s, %s, %s, %s, %s)",
+                    (name.strip(), company.strip(), role_input.strip(), skills.strip(), me)
+                )
+                st.success("✅ Profile saved successfully!")
+                st.rerun()
 
 # ============================================================
 #  VIEW PROFILES
@@ -312,6 +363,11 @@ elif choice == "👥 View Profiles":
                             st.session_state.chat_with = row[1]
                             st.rerun()
 
+                # Show edit to owner or admin
+                # row[5] is username column if exists
+                row_owner = row[5] if len(row) > 5 else ""
+                is_owner = row_owner == me
+
                 if is_admin:
                     d1, d2 = st.columns(2)
                     with d1:
@@ -322,8 +378,11 @@ elif choice == "👥 View Profiles":
                             c.execute("DELETE FROM users WHERE id=%s", (row[0],))
                             st.success(f"Deleted {row[1]}")
                             st.rerun()
+                elif is_owner:
+                    if st.button("✏️ Edit My Profile", key=f"edit_{row[0]}", use_container_width=True):
+                        st.session_state.edit_id = row[0]
 
-        if st.session_state.edit_id:
+    if st.session_state.edit_id:
             st.divider()
             st.subheader("✏️ Edit Profile")
             c.execute("SELECT * FROM users WHERE id=%s", (st.session_state.edit_id,))
