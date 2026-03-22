@@ -187,13 +187,7 @@ if st.session_state.role is None:
                         st.error("❌ Wrong password.")
                     else:
                         st.error(f"❌ No account found for '{clean_user}'. Please register first.")
-
-        with st.expander("🔧 Debug — Check registered accounts"):
-            c.execute("SELECT username, role FROM accounts")
-            for acc in c.fetchall():
-                st.write(f"👤 `{acc[0]}` — `{acc[1]}`")
-            st.caption(f"DB: `{os.path.abspath('database.db')}`")
-
+                        
     with tab2:
         st.markdown("### Create a new account")
         new_user = st.text_input("Choose Username", key="reg_user")
