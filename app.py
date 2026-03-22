@@ -147,7 +147,7 @@ if st.session_state.role is None:
                     else:
                         st.error(f"❌ No account found for '{clean_user}'. Please register first.")
 
-        
+
 
     with tab2:
         st.markdown("### Create a new account")
@@ -415,8 +415,8 @@ elif choice == "💬 Messages":
     st.subheader("💬 Messages")
 
     c.execute("""SELECT DISTINCT
-                   CASE WHEN from_user=? THEN to_user ELSE from_user END as other
-                 FROM messages WHERE from_user=? OR to_user=?
+                   CASE WHEN from_user=%s THEN to_user ELSE from_user END as other
+                 FROM messages WHERE from_user=%s OR to_user=%s
                  ORDER BY other""", (me, me, me))
     conversations = [r[0] for r in c.fetchall()]
 
@@ -456,7 +456,7 @@ elif choice == "💬 Messages":
 
             # Load history
             c.execute("""SELECT from_user, message, created_at FROM messages
-                         WHERE (from_user=? AND to_user=?) OR (from_user=? AND to_user=?)
+                         WHERE (from_user=%s AND to_user=%s) OR (from_user=%s AND to_user=%s)
                          ORDER BY created_at ASC""", (me, chat_with, chat_with, me))
             msgs = c.fetchall()
 
@@ -566,7 +566,7 @@ elif choice == "🤝 My Connections":
                     with b2:
                         if st.button("🔗 Remove", key=f"rem_{friend}", use_container_width=True):
                             c.execute("""DELETE FROM connections
-                                         WHERE (from_user=? AND to_user=?)
+                                         WHERE (from_user=%s AND to_user=%s)
                                             OR (from_user=%s AND to_user=%s)""",
                                       (me, friend, friend, me))
                             st.success(f"Removed {friend}.")
